@@ -3,11 +3,16 @@
 import { useState, useRef, DragEvent } from 'react'
 import { motion } from 'framer-motion'
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || ''
+
 interface Props {
   onUpload: (jobId: string, count: number) => void
+  engine: 'scraping' | 'waba'
+  wabaConfig: { phoneNumberId: string; accessToken: string }
 }
 
-export default function UploadZone({ onUpload }: Props) {
+export default function UploadZone({ onUpload, engine, wabaConfig }: Props) {
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [fileName, setFileName] = useState<string | null>(null)
@@ -26,8 +31,18 @@ export default function UploadZone({ onUpload }: Props) {
     const formData = new FormData()
     formData.append('csv', file)
 
+    // Bind WABA credentials to the job server-side so they never need to travel again
+    if (engine === 'waba') {
+      formData.append('phoneNumberId', wabaConfig.phoneNumberId)
+      formData.append('accessToken', wabaConfig.accessToken)
+    }
+
     try {
-      const res = await fetch('http://localhost:3001/upload', { method: 'POST', body: formData })
+      const res = await fetch(`${API_URL}/upload`, {
+        method: 'POST',
+        headers: { 'x-api-key': API_KEY },
+        body: formData,
+      })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       onUpload(data.jobId, data.count)

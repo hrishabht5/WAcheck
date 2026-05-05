@@ -1,16 +1,40 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)),
+  ]);
+}
+
 let client = null;
 let clientReady = false;
+let initializing = false;
+
+async function destroyClient() {
+  if (client) {
+    try { await client.destroy(); } catch (_) {}
+    client = null;
+  }
+  clientReady = false;
+  initializing = false;
+}
 
 function initClient(io) {
+  if (initializing) return;
+  initializing = true;
+
   client = new Client({
     authStrategy: new LocalAuth({ clientId: 'checkwa-session' }),
     puppeteer: {
       headless: true,
-      // On Windows, puppeteer downloads Chromium automatically on first run
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        // --no-sandbox disables OS process isolation — only acceptable on local dev machines
+        // In production, run as a non-root user or inside a container with proper namespaces
+        ...(process.env.NODE_ENV !== 'production' ? ['--no-sandbox', '--disable-setuid-sandbox'] : []),
+        '--disable-dev-shm-usage',
+      ],
     },
   });
 
@@ -21,12 +45,14 @@ function initClient(io) {
   });
 
   client.on('ready', () => {
+    initializing = false;
     clientReady = true;
     io.emit('client_ready', true);
     io.emit('log', { text: 'WhatsApp client connected and ready', type: 'success' });
   });
 
   client.on('disconnected', () => {
+    initializing = false;
     clientReady = false;
     io.emit('client_ready', false);
     io.emit('log', { text: 'WhatsApp client disconnected', type: 'error' });
@@ -39,7 +65,7 @@ function isReady() {
   return clientReady;
 }
 
-async function validateNumbers(numbers, io, jobId) {
+async function validateNumbers(numbers, emit, jobId) {
   if (!clientReady || !client) {
     throw new Error('WhatsApp client not ready. Please scan QR first.');
   }
@@ -53,33 +79,42 @@ async function validateNumbers(numbers, io, jobId) {
     const num = numbers[i];
     const pending = total - i - 1;
 
+    if (!isReady()) {
+      for (let j = i; j < numbers.length; j++) {
+        invalid++;
+        results.push({ number: numbers[j], status: 'error' });
+      }
+      emit('log', { text: 'WhatsApp client disconnected mid-job. Reconnect and retry.', type: 'error' });
+      emit('progress', { jobId, verified, invalid, pending: 0, total, current: total });
+      break;
+    }
+
     try {
-      // 2-second delay to prevent bans
+      // 2-second delay to reduce ban risk
       await new Promise((r) => setTimeout(r, 2000));
 
-      // JID requires number without leading '+', e.g. "14155551234@c.us"
       const jid = num.replace(/^\+/, '') + '@c.us';
-      const isRegistered = await client.isRegisteredUser(jid);
+      const isRegistered = await withTimeout(client.isRegisteredUser(jid), 10_000);
 
       if (isRegistered) {
         verified++;
         results.push({ number: num, status: 'valid' });
-        io.emit('log', { text: `Checking ${num}... SUCCESS`, type: 'success' });
+        emit('log', { text: `Checking ${num}... SUCCESS`, type: 'success' });
       } else {
         invalid++;
         results.push({ number: num, status: 'invalid' });
-        io.emit('log', { text: `Checking ${num}... NOT FOUND`, type: 'error' });
+        emit('log', { text: `Checking ${num}... NOT FOUND`, type: 'error' });
       }
     } catch (err) {
       invalid++;
       results.push({ number: num, status: 'error' });
-      io.emit('log', { text: `Checking ${num}... ERROR: ${err.message}`, type: 'error' });
+      emit('log', { text: `Checking ${num}... ERROR: ${err.message}`, type: 'error' });
     }
 
-    io.emit('progress', { jobId, verified, invalid, pending, total, current: i + 1 });
+    emit('progress', { jobId, verified, invalid, pending, total, current: i + 1 });
   }
 
   return results;
 }
 
-module.exports = { initClient, isReady, validateNumbers };
+module.exports = { initClient, isReady, validateNumbers, destroyClient };

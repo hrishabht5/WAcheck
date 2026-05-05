@@ -10,6 +10,9 @@ import ProgressBar from '../components/ProgressBar'
 import TerminalLog from '../components/TerminalLog'
 import ExportButton from '../components/ExportButton'
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || ''
+
 type Engine = 'scraping' | 'waba'
 
 interface LogEntry {
@@ -97,16 +100,16 @@ export default function DashboardPage() {
     setValidationDone(false)
     addLog('Initiating validation sequence...', 'info')
 
-    const body: Record<string, string> = { jobId, engine }
-    if (engine === 'waba') {
-      body.phoneNumberId = wabaConfig.phoneNumberId
-      body.accessToken = wabaConfig.accessToken
-    }
+    const socket = getSocket()
 
-    await fetch('http://localhost:3001/validate', {
+    // Credentials are already bound to the job server-side — send only job metadata
+    await fetch(`${API_URL}/validate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+      },
+      body: JSON.stringify({ jobId, engine, socketId: socket.id }),
     })
   }
 
@@ -177,7 +180,7 @@ export default function DashboardPage() {
             onWabaChange={(field, value) => setWabaConfig((prev) => ({ ...prev, [field]: value }))}
           />
 
-          <UploadZone onUpload={handleUpload} />
+          <UploadZone onUpload={handleUpload} engine={engine} wabaConfig={wabaConfig} />
 
           {/* Job summary */}
           {jobId && (

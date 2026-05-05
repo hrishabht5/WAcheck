@@ -3,6 +3,9 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || ''
+
 interface Props {
   jobId: string | null
   disabled: boolean
@@ -15,7 +18,9 @@ export default function ExportButton({ jobId, disabled }: Props) {
     if (!jobId) return
     setLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/export/${jobId}`)
+      const res = await fetch(`${API_URL}/export/${jobId}`, {
+        headers: { 'x-api-key': API_KEY },
+      })
       if (!res.ok) throw new Error('Export failed')
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)

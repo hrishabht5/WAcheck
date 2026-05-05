@@ -1,7 +1,14 @@
 const axios = require('axios');
+const { randomDelay, exponentialBackoff } = require('../utils/delays');
+
+const WABA_MIN_BATCH_DELAY_MS     = parseInt(process.env.WABA_MIN_BATCH_DELAY_MS,     10) || 800;
+const WABA_MAX_BATCH_DELAY_MS     = parseInt(process.env.WABA_MAX_BATCH_DELAY_MS,     10) || 2000;
+const WABA_MAX_CONSECUTIVE_ERRORS = parseInt(process.env.WABA_MAX_CONSECUTIVE_ERRORS, 10) || 5;
+const WABA_RETRY_AFTER_DEFAULT_MS = parseInt(process.env.WABA_RETRY_AFTER_DEFAULT_MS, 10) || 60000;
+const WABA_BACKOFF_BASE_MS        = parseInt(process.env.WABA_BACKOFF_BASE_MS,        10) || 3000;
+const WABA_BACKOFF_MAX_MS         = parseInt(process.env.WABA_BACKOFF_MAX_MS,         10) || 60000;
 
 async function validateNumbers(numbers, phoneNumberId, accessToken, emit, jobId) {
-  // Reject phoneNumberId values that contain anything other than digits to prevent URL injection
   if (!/^\d{1,20}$/.test(phoneNumberId)) {
     throw new Error('Invalid phoneNumberId format');
   }
@@ -10,7 +17,6 @@ async function validateNumbers(numbers, phoneNumberId, accessToken, emit, jobId)
   }
 
   const BATCH_SIZE = 50;
-  const MAX_CONSECUTIVE_ERRORS = 5;
 
   const results = [];
   const total = numbers.length;
@@ -20,55 +26,98 @@ async function validateNumbers(numbers, phoneNumberId, accessToken, emit, jobId)
 
   for (let i = 0; i < numbers.length; i += BATCH_SIZE) {
     const batch = numbers.slice(i, Math.min(i + BATCH_SIZE, numbers.length));
+    const batchLabel = `[${i + 1}–${i + batch.length}]`;
 
-    try {
-      const response = await axios.post(
-        `https://graph.facebook.com/v18.0/${phoneNumberId}/contacts`,
-        { blocking: 'wait', contacts: batch, force_check: false },
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
+    if (i > 0) {
+      await randomDelay(WABA_MIN_BATCH_DELAY_MS, WABA_MAX_BATCH_DELAY_MS);
+    }
+
+    let batchSucceeded = false;
+    let retried429 = false;
+
+    for (let attempt = 1; attempt <= WABA_MAX_CONSECUTIVE_ERRORS; attempt++) {
+      try {
+        const response = await axios.post(
+          `https://graph.facebook.com/v18.0/${phoneNumberId}/contacts`,
+          { blocking: 'wait', contacts: batch, force_check: false },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 30000,
+          }
+        );
+
+        consecutiveErrors = 0;
+        const contactMap = new Map((response.data?.contacts ?? []).map((c) => [c.input, c]));
+
+        for (const num of batch) {
+          const contact = contactMap.get(num);
+          const isValid = contact?.status === 'valid';
+          if (isValid) {
+            verified++;
+            results.push({ number: num, status: 'valid', waId: contact.wa_id });
+            emit('log', { text: `Checking ${num}... SUCCESS (wa_id: ${contact.wa_id})`, type: 'success' });
+          } else {
+            invalid++;
+            results.push({ number: num, status: 'invalid' });
+            emit('log', { text: `Checking ${num}... INVALID`, type: 'error' });
+          }
         }
-      );
 
-      consecutiveErrors = 0;
+        batchSucceeded = true;
+        break;
 
-      const contactMap = new Map((response.data?.contacts ?? []).map((c) => [c.input, c]));
+      } catch (err) {
+        if (err.response?.status === 429 && !retried429) {
+          retried429 = true;
+          const retryAfterMs = err.response.headers?.['retry-after']
+            ? parseInt(err.response.headers['retry-after'], 10) * 1000
+            : WABA_RETRY_AFTER_DEFAULT_MS;
+          emit('log', {
+            text: `Batch ${batchLabel} rate-limited (429). Waiting ${Math.round(retryAfterMs / 1000)}s...`,
+            type: 'warn',
+          });
+          await new Promise((r) => setTimeout(r, retryAfterMs));
+          emit('log', { text: `Retrying batch ${batchLabel}.`, type: 'info' });
+          continue;
+        }
 
-      for (const num of batch) {
-        const contact = contactMap.get(num);
-        const isValid = contact?.status === 'valid';
-        if (isValid) {
-          verified++;
-          results.push({ number: num, status: 'valid', waId: contact.wa_id });
-          emit('log', { text: `Checking ${num}... SUCCESS (wa_id: ${contact.wa_id})`, type: 'success' });
-        } else {
-          invalid++;
-          results.push({ number: num, status: 'invalid' });
-          emit('log', { text: `Checking ${num}... INVALID`, type: 'error' });
+        consecutiveErrors++;
+        const raw = err.response?.data?.error?.message || err.message || 'Unknown error';
+        const safeMsg = raw.replace(/[A-Za-z0-9\-_.~+/]{20,}/g, '[REDACTED]');
+        emit('log', {
+          text: `Batch ${batchLabel} ERROR (attempt ${attempt}/${WABA_MAX_CONSECUTIVE_ERRORS}): ${safeMsg}`,
+          type: 'error',
+        });
+
+        if (attempt < WABA_MAX_CONSECUTIVE_ERRORS) {
+          await exponentialBackoff(attempt, WABA_BACKOFF_BASE_MS, WABA_BACKOFF_MAX_MS);
         }
       }
-    } catch (err) {
-      consecutiveErrors++;
-      const raw = err.response?.data?.error?.message || err.message || 'Unknown error';
-      // Redact any long token-like strings before surfacing the error to the client
-      const safeMsg = raw.replace(/[A-Za-z0-9\-_.~+/]{20,}/g, '[REDACTED]');
+    }
 
+    if (!batchSucceeded) {
       for (const num of batch) {
         invalid++;
         results.push({ number: num, status: 'error' });
       }
-      emit('log', { text: `Batch [${i + 1}–${i + batch.length}] ERROR: ${safeMsg}`, type: 'error' });
+      emit('log', {
+        text: `Batch ${batchLabel} failed after ${WABA_MAX_CONSECUTIVE_ERRORS} attempts.`,
+        type: 'error',
+      });
 
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        for (let j = i + BATCH_SIZE; j < numbers.length; j++) {
+      if (consecutiveErrors >= WABA_MAX_CONSECUTIVE_ERRORS) {
+        const remaining = numbers.slice(i + BATCH_SIZE);
+        for (const num of remaining) {
           invalid++;
-          results.push({ number: numbers[j], status: 'error' });
+          results.push({ number: num, status: 'error' });
         }
-        emit('log', { text: `Aborting: ${MAX_CONSECUTIVE_ERRORS} consecutive batch failures.`, type: 'error' });
+        emit('log', {
+          text: `Aborting: ${WABA_MAX_CONSECUTIVE_ERRORS} consecutive batch failures. Check credentials.`,
+          type: 'error',
+        });
         emit('progress', { jobId, verified, invalid, pending: 0, total, current: total });
         break;
       }

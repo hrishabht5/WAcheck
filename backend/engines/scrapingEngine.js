@@ -1,5 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const { randomDelay, exponentialBackoff } = require('../utils/delays');
 
 function withTimeout(promise, ms) {
   return Promise.race([
@@ -8,9 +9,20 @@ function withTimeout(promise, ms) {
   ]);
 }
 
+const SCRAPING_MIN_DELAY_MS    = parseInt(process.env.SCRAPING_MIN_DELAY_MS,    10) || 1500;
+const SCRAPING_MAX_DELAY_MS    = parseInt(process.env.SCRAPING_MAX_DELAY_MS,    10) || 4000;
+const SCRAPING_COOLDOWN_EVERY  = parseInt(process.env.SCRAPING_COOLDOWN_EVERY,  10) || 50;
+const SCRAPING_COOLDOWN_MIN_MS = parseInt(process.env.SCRAPING_COOLDOWN_MIN_MS, 10) || 15000;
+const SCRAPING_COOLDOWN_MAX_MS = parseInt(process.env.SCRAPING_COOLDOWN_MAX_MS, 10) || 30000;
+const SCRAPING_SESSION_LIMIT   = parseInt(process.env.SCRAPING_SESSION_LIMIT,   10) || 300;
+const SCRAPING_MAX_RETRIES     = parseInt(process.env.SCRAPING_MAX_RETRIES,     10) || 3;
+const SCRAPING_BACKOFF_BASE_MS = parseInt(process.env.SCRAPING_BACKOFF_BASE_MS, 10) || 2000;
+const SCRAPING_BACKOFF_MAX_MS  = parseInt(process.env.SCRAPING_BACKOFF_MAX_MS,  10) || 30000;
+
 let client = null;
 let clientReady = false;
 let initializing = false;
+let sessionCounter = 0;
 
 async function destroyClient() {
   if (client) {
@@ -45,6 +57,7 @@ function initClient(io) {
   });
 
   client.on('ready', () => {
+    sessionCounter = 0;
     initializing = false;
     clientReady = true;
     io.emit('client_ready', true);
@@ -89,29 +102,80 @@ async function validateNumbers(numbers, emit, jobId) {
       break;
     }
 
-    try {
-      // 2-second delay to reduce ban risk
-      await new Promise((r) => setTimeout(r, 2000));
-
-      const jid = num.replace(/^\+/, '') + '@c.us';
-      const isRegistered = await withTimeout(client.isRegisteredUser(jid), 10_000);
-
-      if (isRegistered) {
-        verified++;
-        results.push({ number: num, status: 'valid' });
-        emit('log', { text: `Checking ${num}... SUCCESS`, type: 'success' });
-      } else {
+    if (sessionCounter >= SCRAPING_SESSION_LIMIT) {
+      for (let j = i; j < numbers.length; j++) {
         invalid++;
-        results.push({ number: num, status: 'invalid' });
-        emit('log', { text: `Checking ${num}... NOT FOUND`, type: 'error' });
+        results.push({ number: numbers[j], status: 'error' });
       }
-    } catch (err) {
+      emit('log', {
+        text: `Session limit of ${SCRAPING_SESSION_LIMIT} lookups reached. Reconnect WhatsApp to reset.`,
+        type: 'error',
+      });
+      emit('progress', { jobId, verified, invalid, pending: 0, total, current: total });
+      break;
+    }
+
+    if (sessionCounter >= SCRAPING_SESSION_LIMIT - 10) {
+      emit('log', {
+        text: `Warning: ${sessionCounter}/${SCRAPING_SESSION_LIMIT} session lookups used.`,
+        type: 'warn',
+      });
+    }
+
+    let succeeded = false;
+    let errorCount = 0;
+
+    for (let attempt = 0; attempt <= SCRAPING_MAX_RETRIES; attempt++) {
+      try {
+        await randomDelay(SCRAPING_MIN_DELAY_MS, SCRAPING_MAX_DELAY_MS);
+
+        const jid = num.replace(/^\+/, '') + '@c.us';
+        const isRegistered = await withTimeout(client.isRegisteredUser(jid), 10_000);
+
+        sessionCounter++;
+        errorCount = 0;
+        succeeded = true;
+
+        if (isRegistered) {
+          verified++;
+          results.push({ number: num, status: 'valid' });
+          emit('log', { text: `Checking ${num}... SUCCESS`, type: 'success' });
+        } else {
+          invalid++;
+          results.push({ number: num, status: 'invalid' });
+          emit('log', { text: `Checking ${num}... NOT FOUND`, type: 'error' });
+        }
+        break;
+
+      } catch (err) {
+        errorCount++;
+        emit('log', {
+          text: `Checking ${num}... ERROR (attempt ${attempt + 1}/${SCRAPING_MAX_RETRIES + 1}): ${err.message}`,
+          type: 'error',
+        });
+        if (attempt < SCRAPING_MAX_RETRIES) {
+          await exponentialBackoff(errorCount, SCRAPING_BACKOFF_BASE_MS, SCRAPING_BACKOFF_MAX_MS);
+        }
+      }
+    }
+
+    if (!succeeded) {
       invalid++;
       results.push({ number: num, status: 'error' });
-      emit('log', { text: `Checking ${num}... ERROR: ${err.message}`, type: 'error' });
+      emit('log', { text: `Checking ${num}... FAILED after ${SCRAPING_MAX_RETRIES + 1} attempts`, type: 'error' });
     }
 
     emit('progress', { jobId, verified, invalid, pending, total, current: i + 1 });
+
+    if ((i + 1) % SCRAPING_COOLDOWN_EVERY === 0 && i + 1 < total) {
+      const approxSec = Math.round((SCRAPING_COOLDOWN_MIN_MS + SCRAPING_COOLDOWN_MAX_MS) / 2 / 1000);
+      emit('log', {
+        text: `Cooling down after ${i + 1} numbers (~${approxSec}s pause) to reduce ban risk...`,
+        type: 'warn',
+      });
+      await randomDelay(SCRAPING_COOLDOWN_MIN_MS, SCRAPING_COOLDOWN_MAX_MS);
+      emit('log', { text: 'Cooldown complete. Resuming.', type: 'info' });
+    }
   }
 
   return results;

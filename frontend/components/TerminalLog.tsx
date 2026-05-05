@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 interface LogEntry {
   id: number
   text: string
-  type: 'success' | 'error' | 'info'
+  type: 'success' | 'error' | 'info' | 'warn'
   timestamp: string
 }
 
@@ -25,12 +25,14 @@ export default function TerminalLog({ logs }: Props) {
     success: 'text-emerald-400',
     error: 'text-rose-400',
     info: 'text-indigo-300',
+    warn: 'text-amber-400',
   }
 
   const prefixMap = {
     success: '✓',
     error: '✗',
     info: '›',
+    warn: '⚠',
   }
 
   return (

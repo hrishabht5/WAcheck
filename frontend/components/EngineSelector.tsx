@@ -29,7 +29,7 @@ export default function EngineSelector({ engine, onChange, wabaConfig, onWabaCha
             <span className="text-lg">📡</span>
             <span className="text-sm font-semibold text-slate-200">Mode A — Scraping</span>
           </div>
-          <p className="text-xs text-slate-500">QR scan via whatsapp-web.js</p>
+          <p className="text-xs text-slate-500">QR scan · jittered delays · 300 lookups/session</p>
           {engine === 'scraping' && (
             <motion.div
               layoutId="engine-indicator"
@@ -52,7 +52,7 @@ export default function EngineSelector({ engine, onChange, wabaConfig, onWabaCha
             <span className="text-lg">🔑</span>
             <span className="text-sm font-semibold text-slate-200">Mode B — WABA API</span>
           </div>
-          <p className="text-xs text-slate-500">Official Meta /contacts API</p>
+          <p className="text-xs text-slate-500">Official Meta API · 50/batch · 429-aware</p>
           {engine === 'waba' && (
             <motion.div
               layoutId="engine-indicator"

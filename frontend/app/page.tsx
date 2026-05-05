@@ -18,7 +18,7 @@ type Engine = 'scraping' | 'waba'
 interface LogEntry {
   id: number
   text: string
-  type: 'success' | 'error' | 'info'
+  type: 'success' | 'error' | 'info' | 'warn'
   timestamp: string
 }
 

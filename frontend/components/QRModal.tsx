@@ -92,7 +92,7 @@ export default function QRModal({ onConnected }: Props) {
                 </div>
 
                 <p className="text-xs text-slate-600 font-mono">
-                  Session is saved locally. QR scan required only once.
+                  Session saved locally — rescan only if expired. Resets after 300 lookups.
                 </p>
               </div>
             )}

@@ -36,6 +36,7 @@ async function destroyClient() {
 function initClient(io) {
   if (initializing) return;
   initializing = true;
+  console.log('[scraping] Creating WhatsApp client...');
 
   client = new Client({
     authStrategy: new LocalAuth({ clientId: 'checkwa-session' }),
@@ -51,12 +52,14 @@ function initClient(io) {
   });
 
   client.on('qr', async (qr) => {
+    console.log('[scraping] QR code received from WhatsApp');
     const dataUrl = await qrcode.toDataURL(qr);
     io.emit('qr', dataUrl);
     io.emit('log', { text: 'QR code generated — scan with WhatsApp', type: 'info' });
   });
 
   client.on('ready', () => {
+    console.log('[scraping] Client is READY');
     sessionCounter = 0;
     initializing = false;
     clientReady = true;
@@ -64,14 +67,29 @@ function initClient(io) {
     io.emit('log', { text: 'WhatsApp client connected and ready', type: 'success' });
   });
 
+  client.on('authenticated', () => {
+    console.log('[scraping] Client authenticated — syncing session...');
+    io.emit('log', { text: 'Authenticated! Syncing session (this may take 1-2 min)...', type: 'info' });
+  });
+
+  client.on('loading_screen', (percent, message) => {
+    console.log(`[scraping] Loading: ${percent}% — ${message}`);
+  });
+
   client.on('disconnected', () => {
+    console.log('[scraping] Client disconnected');
     initializing = false;
     clientReady = false;
     io.emit('client_ready', false);
     io.emit('log', { text: 'WhatsApp client disconnected', type: 'error' });
   });
 
-  client.initialize();
+  console.log('[scraping] Calling client.initialize()...');
+  client.initialize().catch((err) => {
+    console.error('[scraping] Client initialization failed:', err.message);
+    initializing = false;
+    io.emit('log', { text: `Initialization failed: ${err.message}. Click Connect WhatsApp to retry.`, type: 'error' });
+  });
 }
 
 function isReady() {

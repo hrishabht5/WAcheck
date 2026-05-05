@@ -86,6 +86,13 @@ export default function DashboardPage() {
     setScrapingReady(true)
   }, [])
 
+  const handleDisconnect = useCallback(() => {
+    const socket = getSocket()
+    socket.emit('disconnect_scraping')
+    setScrapingReady(false)
+    addLog('Disconnecting WhatsApp session...', 'info')
+  }, [addLog])
+
   function handleUpload(id: string, count: number) {
     setJobId(id)
     setNumberCount(count)
@@ -159,6 +166,17 @@ export default function DashboardPage() {
               className="px-4 py-1.5 rounded-full text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-500/40 transition-colors"
             >
               Connect WhatsApp
+            </motion.button>
+          )}
+
+          {engine === 'scraping' && scrapingReady && (
+            <motion.button
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
+              onClick={handleDisconnect}
+              className="px-4 py-1.5 rounded-full text-xs font-semibold bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/30 transition-colors"
+            >
+              Disconnect
             </motion.button>
           )}
         </div>

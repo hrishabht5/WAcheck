@@ -80,6 +80,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('disconnect_scraping', async () => {
+    console.log('[scraping] Disconnect requested by client');
+    await scrapingEngine.destroyClient();
+    io.emit('client_ready', false);
+    io.emit('log', { text: 'WhatsApp session disconnected', type: 'info' });
+  });
+
   socket.on('disconnect', () => {
     console.log(`Socket disconnected: ${socket.id}`);
   });
